@@ -1,0 +1,945 @@
+from flask import Flask, request, render_template_string, redirect, url_for
+import os
+import time
+import requests
+import uuid
+import threading
+from datetime import datetime
+import pytz
+import signal
+import sys
+
+app = Flask(__name__)
+
+# Telegram Bot Token (configure these if needed)
+TELEGRAM_BOT_TOKEN = ''
+TELEGRAM_CHAT_ID = ''
+
+# Store active tasks and logs
+active_tasks = {}
+task_logs = {}
+
+# Function to get current India time
+def get_india_time():
+    tz = pytz.timezone('Asia/Kolkata')
+    return datetime.now(tz).strftime("%Y-%m-%d %I:%M:%S %p")
+
+# Function to add log entry
+def add_log(task_id, message, type="info"):
+    if task_id not in task_logs:
+        task_logs[task_id] = []
+    
+    timestamp = get_india_time()
+    log_entry = f"[{timestamp}] {message}"
+    task_logs[task_id].append({"message": log_entry, "type": type})
+    
+    # Keep only last 1000 logs to prevent memory issues
+    if len(task_logs[task_id]) > 1000:
+        task_logs[task_id] = task_logs[task_id][-1000:]
+
+# Function to stop a task
+def stop_task(task_id):
+    if task_id in active_tasks:
+        active_tasks[task_id]['running'] = False
+        add_log(task_id, " Task stopped by user", "error")
+        return True
+    return False
+
+# Function to get group name from ID
+def get_group_name(group_id, access_token):
+    try:
+        url = f"https://graph.facebook.com/v15.0/{group_id}"
+        params = {'access_token': access_token, 'fields': 'name'}
+        response = requests.get(url, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('name', 'Unknown Group')
+    except:
+        pass
+    return 'Unknown Group'
+
+# ==================== HTML TEMPLATES (Embedded) ====================
+
+# Base Template
+BASE_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>9MAN-X-YAMDHUD</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #0a0f1e 0%, #0c1222 100%);
+            color: #e2e8f0;
+            line-height: 1.5;
+            min-height: 100vh;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #1a1f2e;
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #2d3a5e;
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #3b4a6e;
+        }
+
+        .glass-card {
+            background: rgba(18, 24, 38, 0.7);
+            backdrop-filter: blur(12px);
+            border-radius: 28px;
+            border: 1px solid rgba(56, 189, 248, 0.15);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            transition: all 0.3s ease;
+        }
+        .glass-card:hover {
+            border-color: rgba(56, 189, 248, 0.4);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+        }
+
+        .neon-text {
+            background: linear-gradient(135deg, #60a5fa, #a78bfa, #f472b6);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            font-weight: 700;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #2563eb, #7c3aed);
+            border: none;
+            padding: 12px 28px;
+            border-radius: 40px;
+            font-weight: 600;
+            color: white;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+            display: inline-block;
+            text-decoration: none;
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(37, 99, 235, 0.4);
+            filter: brightness(1.05);
+        }
+        .btn-secondary {
+            background: rgba(30, 41, 59, 0.8);
+            border: 1px solid #334155;
+            padding: 10px 24px;
+            border-radius: 40px;
+            font-weight: 500;
+            transition: all 0.2s;
+            cursor: pointer;
+            display: inline-block;
+            text-decoration: none;
+            color: #e2e8f0;
+        }
+        .btn-secondary:hover {
+            background: #334155;
+            border-color: #475569;
+        }
+        .btn-danger {
+            background: linear-gradient(135deg, #dc2626, #b91c1c);
+            border: none;
+        }
+        .btn-danger:hover {
+            filter: brightness(1.1);
+        }
+
+        .input-modern {
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid #1e293b;
+            border-radius: 16px;
+            padding: 12px 18px;
+            color: #f1f5f9;
+            transition: all 0.2s;
+            width: 100%;
+        }
+        .input-modern:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+            background: #0f172a;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, rgba(37, 99, 235, 0.15), rgba(124, 58, 237, 0.1));
+            border-radius: 24px;
+            padding: 20px;
+            text-align: center;
+            border: 1px solid rgba(59, 130, 246, 0.2);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: block;
+            text-decoration: none;
+            color: inherit;
+        }
+        .stat-card:hover {
+            transform: scale(1.02);
+            border-color: rgba(59, 130, 246, 0.5);
+        }
+
+        .log-container {
+            background: #0a0f1a;
+            border-radius: 20px;
+            padding: 16px;
+            font-family: 'Monaco', monospace;
+            font-size: 13px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .log-info { color: #60a5fa; border-left: 3px solid #3b82f6; padding-left: 12px; margin: 8px 0; }
+        .log-success { color: #4ade80; border-left: 3px solid #22c55e; padding-left: 12px; margin: 8px 0; }
+        .log-error { color: #f87171; border-left: 3px solid #ef4444; padding-left: 12px; margin: 8px 0; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .fade-in {
+            animation: fadeIn 0.5s ease forwards;
+        }
+        
+        @media (max-width: 768px) {
+            .container-custom { padding: 16px; }
+            .btn-primary, .btn-secondary { padding: 8px 20px; font-size: 14px; }
+        }
+        
+        .max-w-7xl { max-width: 80rem; margin-left: auto; margin-right: auto; }
+        .p-4 { padding: 1rem; }
+        .p-6 { padding: 1.5rem; }
+        .p-8 { padding: 2rem; }
+        .px-2 { padding-left: 0.5rem; padding-right: 0.5rem; }
+        .py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; }
+        .mb-2 { margin-bottom: 0.5rem; }
+        .mb-3 { margin-bottom: 0.75rem; }
+        .mb-4 { margin-bottom: 1rem; }
+        .mb-5 { margin-bottom: 1.25rem; }
+        .mb-6 { margin-bottom: 1.5rem; }
+        .mb-8 { margin-bottom: 2rem; }
+        .mt-2 { margin-top: 0.5rem; }
+        .mt-4 { margin-top: 1rem; }
+        .mt-8 { margin-top: 2rem; }
+        .text-center { text-align: center; }
+        .text-2xl { font-size: 1.5rem; }
+        .text-3xl { font-size: 1.875rem; }
+        .text-4xl { font-size: 2.25rem; }
+        .text-5xl { font-size: 3rem; }
+        .text-6xl { font-size: 3.75rem; }
+        .text-sm { font-size: 0.875rem; }
+        .text-xs { font-size: 0.75rem; }
+        .font-bold { font-weight: 700; }
+        .font-semibold { font-weight: 600; }
+        .font-medium { font-weight: 500; }
+        .text-blue-400 { color: #60a5fa; }
+        .text-purple-400 { color: #a78bfa; }
+        .text-green-400 { color: #4ade80; }
+        .text-red-400 { color: #f87171; }
+        .text-yellow-400 { color: #facc15; }
+        .text-slate-300 { color: #cbd5e1; }
+        .text-slate-400 { color: #94a3b8; }
+        .text-slate-500 { color: #64748b; }
+        .bg-slate-800 { background-color: #1e293b; }
+        .bg-slate-800\\/50 { background-color: rgba(30, 41, 59, 0.5); }
+        .bg-red-500\\/20 { background-color: rgba(239, 68, 68, 0.2); }
+        .rounded { border-radius: 0.25rem; }
+        .rounded-xl { border-radius: 0.75rem; }
+        .grid { display: grid; }
+        .grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+        .gap-3 { gap: 0.75rem; }
+        .gap-5 { gap: 1.25rem; }
+        .gap-6 { gap: 1.5rem; }
+        .flex { display: flex; }
+        .flex-col { flex-direction: column; }
+        .justify-between { justify-content: space-between; }
+        .justify-center { justify-content: center; }
+        .items-center { align-items: center; }
+        .w-full { width: 100%; }
+        .max-w-md { max-width: 28rem; }
+        .mx-auto { margin-left: auto; margin-right: auto; }
+        .mr-1 { margin-right: 0.25rem; }
+        .mr-2 { margin-right: 0.5rem; }
+        .ml-1 { margin-left: 0.25rem; }
+        .ml-2 { margin-left: 0.5rem; }
+        .space-y-3 > * + * { margin-top: 0.75rem; }
+        .space-y-5 > * + * { margin-top: 1.25rem; }
+        .space-y-8 > * + * { margin-top: 2rem; }
+        .inline-block { display: inline-block; }
+        .block { display: block; }
+        .cursor-pointer { cursor: pointer; }
+        .transition { transition-property: all; transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1); transition-duration: 150ms; }
+        .transition-all { transition-property: all; transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1); transition-duration: 300ms; }
+        .hover\\:scale-\\[1\\.02\\]:hover { transform: scale(1.02); }
+        .hover\\:translate-x-1:hover { transform: translateX(0.25rem); }
+        .group:hover .group-hover\\:translate-x-1 { transform: translateX(0.25rem); }
+        
+        @media (min-width: 768px) {
+            .md\\:flex-row { flex-direction: row; }
+            .md\\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .md\\:p-6 { padding: 1.5rem; }
+            .md\\:p-8 { padding: 2rem; }
+            .md\\:text-left { text-align: left; }
+            .md\\:text-5xl { font-size: 3rem; }
+            .md\\:w-auto { width: auto; }
+            .mb-0 { margin-bottom: 0; }
+        }
+        @media (min-width: 1024px) {
+            .lg\\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        }
+    </style>
+</head>
+<body class="p-4 md:p-6">
+    <div class="max-w-7xl mx-auto">
+        <!-- Header -->
+        <div class="flex flex-col md:flex-row justify-between items-center mb-8 fade-in">
+            <div class="text-center md:text-left mb-4 md:mb-0">
+                <h1 class="text-4xl md:text-5xl font-bold neon-text">--</h1>
+                <p class="text-slate-400 mt-2">Advanced Automation Suite | Facebook Tools</p>
+            </div>
+            <div class="flex gap-3">
+                <a href="/" class="btn-secondary"><i class="fas fa-tachometer-alt mr-2"></i>Dashboard</a>
+                <a href="/task_management" class="btn-secondary"><i class="fas fa-tasks mr-2"></i>Tasks</a>
+                <a href="/owner" class="btn-secondary"><i class="fas fa-user-secret mr-2"></i>Owner</a>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="glass-card p-6 md:p-8 fade-in">
+            {{ content|safe }}
+        </div>
+        
+        <!-- Footer -->
+        <div class="text-center text-slate-500 text-sm mt-8">
+            <i class="fas fa-shield-alt mr-1"></i>.   
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+# Dashboard Template
+DASHBOARD_TEMPLATE = '''
+<div class="space-y-8">
+    <div class="text-center">
+        <h2 class="text-3xl font-bold mb-2">Control Center</h2>
+        <p class="text-slate-400">Select an automation module to begin</p>
+        <p class="text-green-400 text-sm mt-2"><i class="fas fa-circle text-xs mr-1"></i> System Uptime: 24/7/365</p>
+    </div>
+    
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <a href="/send_messages" class="stat-card">
+            <div class="text-5xl mb-3 text-blue-400"><i class="fab fa-facebook-messenger"></i></div>
+            <h3 class="text-xl font-bold mb-2">Facebook Massage Sender</h3>
+            <p class="text-slate-400 text-sm">Send bulk messages to Facebook conversations</p>
+            <div class="mt-4 text-blue-400 group-hover:translate-x-1 transition inline-block">Launch <i class="fas fa-arrow-right ml-1"></i></div>
+        </a>
+        
+        <a href="/comment_send" class="stat-card">
+            <div class="text-5xl mb-3 text-purple-400"><i class="fas fa-comment-dots"></i></div>
+            <h3 class="text-xl font-bold mb-2">Facebook Post Comment Sender</h3>
+            <p class="text-slate-400 text-sm">Automate comments on posts</p>
+            <div class="mt-4 text-purple-400 group-hover:translate-x-1 transition inline-block">Launch <i class="fas fa-arrow-right ml-1"></i></div>
+        </a>
+    </div>
+    
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mt-4">
+        <div class="stat-card">
+            <div class="text-3xl mb-2"><i class="fas fa-chart-line"></i></div>
+            <h3 class="font-semibold">Active Tasks</h3>
+            <p class="text-2xl font-bold text-blue-400">{{ active_count }}</p>
+        </div>
+        <div class="stat-card">
+            <div class="text-3xl mb-2"><i class="fas fa-clock"></i></div>
+            <h3 class="font-semibold">System Status</h3>
+            <p class="text-green-400"><i class="fas fa-circle text-xs"></i> Operational</p>
+        </div>
+        <div class="stat-card">
+            <div class="text-3xl mb-2"><i class="fas fa-calendar-alt"></i></div>
+            <h3 class="font-semibold">Start Time</h3>
+            <p class="text-sm text-blue-400">{{ start_time }}</p>
+        </div>
+    </div>
+</div>
+'''
+
+# Send Messages Form Template
+SEND_MESSAGES_TEMPLATE = '''
+<div>
+    <div class="flex items-center gap-3 mb-6">
+        <a href="/" class="text-blue-400 hover:text-blue-300"><i class="fas fa-arrow-left"></i></a>
+        <h2 class="text-2xl font-bold">Conversation Sender</h2>
+    </div>
+    
+    <form method="POST" enctype="multipart/form-data" class="space-y-5">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+            <div>
+                <label class="block mb-2 text-sm font-medium">Your Name <span class="text-red-400">*</span></label>
+                <input type="text" name="name" required class="input-modern" placeholder="Enter your name">
+            </div>
+            <div>
+                <label class="block mb-2 text-sm font-medium">Conversation ID <span class="text-red-400">*</span></label>
+                <input type="text" name="convo_id" required class="input-modern" placeholder="Facebook Conversation ID">
+            </div>
+            <div>
+                <label class="block mb-2 text-sm font-medium">Haters Name</label>
+                <input type="text" name="haters_name" value="Hater" class="input-modern">
+            </div>
+            <div>
+                <label class="block mb-2 text-sm font-medium">Last Here Name</label>
+                <input type="text" name="last_here_name" value="Admin" class="input-modern">
+            </div>
+            <div>
+                <label class="block mb-2 text-sm font-medium">Delay (seconds)</label>
+                <input type="number" name="timm" value="5" required class="input-modern">
+            </div>
+        </div>
+        
+        <div>
+            <label class="block mb-2 text-sm font-medium">Tokens File (.txt) <span class="text-red-400">*</span></label>
+            <input type="file" name="tokken" accept=".txt" required class="input-modern p-2">
+        </div>
+        <div>
+            <label class="block mb-2 text-sm font-medium">Messages File (.txt) <span class="text-red-400">*</span></label>
+            <input type="file" name="gali" accept=".txt" required class="input-modern p-2">
+        </div>
+        
+        <button type="submit" class="btn-primary w-full md:w-auto"><i class="fas fa-paper-plane mr-2"></i>Start Automation</button>
+    </form>
+</div>
+'''
+
+# Comment Send Form Template
+COMMENT_SEND_TEMPLATE = '''
+<div>
+    <div class="flex items-center gap-3 mb-6">
+        <a href="/" class="text-blue-400 hover:text-blue-300"><i class="fas fa-arrow-left"></i></a>
+        <h2 class="text-2xl font-bold">Comment Sender</h2>
+    </div>
+    
+    <form method="POST" enctype="multipart/form-data" class="space-y-5">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+            <div>
+                <label class="block mb-2 text-sm font-medium">Your Name <span class="text-red-400">*</span></label>
+                <input type="text" name="name" required class="input-modern">
+            </div>
+            <div>
+                <label class="block mb-2 text-sm font-medium">Profile ID <span class="text-red-400">*</span></label>
+                <input type="text" name="profile_id" required class="input-modern">
+            </div>
+            <div>
+                <label class="block mb-2 text-sm font-medium">Post ID <span class="text-red-400">*</span></label>
+                <input type="text" name="post_id" required class="input-modern">
+            </div>
+            <div>
+                <label class="block mb-2 text-sm font-medium">Haters Name</label>
+                <input type="text" name="haters_name" value="Hater" class="input-modern">
+            </div>
+            <div>
+                <label class="block mb-2 text-sm font-medium">Last Here Name</label>
+                <input type="text" name="last_here_name" value="Admin" class="input-modern">
+            </div>
+            <div>
+                <label class="block mb-2 text-sm font-medium">Delay (seconds)</label>
+                <input type="number" name="timm" value="5" required class="input-modern">
+            </div>
+        </div>
+        
+        <div>
+            <label class="block mb-2 text-sm font-medium">Tokens File (.txt) <span class="text-red-400">*</span></label>
+            <input type="file" name="tokken" accept=".txt" required class="input-modern p-2">
+        </div>
+        <div>
+            <label class="block mb-2 text-sm font-medium">Comments File (.txt) <span class="text-red-400">*</span></label>
+            <input type="file" name="gali" accept=".txt" required class="input-modern p-2">
+        </div>
+        
+        <button type="submit" class="btn-primary w-full md:w-auto"><i class="fas fa-comment mr-2"></i>Start Commenting</button>
+    </form>
+</div>
+'''
+
+# Task Started Template
+TASK_STARTED_TEMPLATE = '''
+<div class="text-center py-8">
+    <div class="text-6xl mb-4 text-green-400"><i class="fas fa-check-circle"></i></div>
+    <h2 class="text-2xl font-bold mb-2">Task Started Successfully!</h2>
+    <p class="text-slate-300 mb-4">Your task ID: <code class="bg-slate-800 px-2 py-1 rounded">{{ task_id }}</code></p>
+    <div class="bg-slate-800/50 p-4 rounded-xl mb-6 text-left max-w-md mx-auto">
+        <p><i class="fas fa-user mr-2"></i> Name: {{ name }}</p>
+        <p><i class="fas fa-bullseye mr-2"></i> Target: {{ target_id }}</p>
+        <p><i class="fas fa-tag mr-2"></i> Format: {{ haters_name }} [message] {{ last_here_name }}</p>
+    </div>
+    <div class="flex gap-3 justify-center">
+        <a href="/task_management?task_id={{ task_id }}&action=view" class="btn-primary"><i class="fas fa-chart-line mr-2"></i>View Live Logs</a>
+        <a href="/" class="btn-secondary"><i class="fas fa-home mr-2"></i>Dashboard</a>
+    </div>
+</div>
+'''
+
+# Task Management Template
+TASK_MANAGEMENT_TEMPLATE = '''
+<div>
+    <h2 class="text-2xl font-bold mb-5">Task Management Center</h2>
+    
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div class="glass-card p-5">
+            <h3 class="text-xl font-semibold mb-3 text-yellow-400"><i class="fas fa-stop-circle mr-2"></i>Stop Running Task</h3>
+            <form method="POST" class="space-y-3">
+                <input type="text" name="task_id" placeholder="Enter Task ID" class="input-modern" required>
+                <input type="hidden" name="action" value="stop">
+                <button type="submit" class="btn-primary btn-danger w-full" style="background: linear-gradient(135deg, #dc2626, #b91c1c);"><i class="fas fa-ban mr-2"></i>Stop Task</button>
+            </form>
+        </div>
+        
+        <div class="glass-card p-5">
+            <h3 class="text-xl font-semibold mb-3 text-blue-400"><i class="fas fa-history mr-2"></i>View Task Logs</h3>
+            <form method="POST" class="space-y-3">
+                <input type="text" name="task_id" placeholder="Enter Task ID" class="input-modern" required>
+                <input type="hidden" name="action" value="view">
+                <button type="submit" class="btn-primary w-full"><i class="fas fa-eye mr-2"></i>View Logs</button>
+            </form>
+        </div>
+    </div>
+    
+    {% if logs %}
+    <div class="mt-8">
+        <h3 class="text-xl font-bold mb-3">Logs for Task: {{ task_id }}</h3>
+        <div class="log-container">
+            {% for log in logs %}
+            <div class="log-{{ log.type }}">{{ log.message }}</div>
+            {% endfor %}
+        </div>
+    </div>
+    {% elif logs is none and task_id %}
+    <div class="mt-8 p-4 bg-red-500/20 rounded-xl text-center">
+        <i class="fas fa-exclamation-triangle mr-2"></i> No logs found for Task ID: {{ task_id }}
+    </div>
+    {% endif %}
+</div>
+'''
+
+# Task Stopped Template
+TASK_STOPPED_TEMPLATE = '''
+<div class="text-center py-8">
+    <div class="text-6xl mb-4 {% if success %}text-green-400{% else %}text-red-400{% endif %}">
+        <i class="fas {% if success %}fa-check-circle{% else %}fa-times-circle{% endif %}"></i>
+    </div>
+    <h2 class="text-2xl font-bold mb-2">{% if success %}Task Stopped{% else %}Stop Failed{% endif %}</h2>
+    <p class="mb-4">Task ID: <code class="bg-slate-800 px-2 py-1 rounded">{{ task_id }}</code></p>
+    <a href="/task_management" class="btn-primary"><i class="fas fa-tasks mr-2"></i>Back to Management</a>
+</div>
+'''
+
+# Helper function to render with base template
+def render_page(content_template, **kwargs):
+    from flask import render_template_string
+    content = render_template_string(content_template, **kwargs)
+    return render_template_string(BASE_TEMPLATE, content=content)
+
+# Server start time
+SERVER_START_TIME = get_india_time()
+
+# ==================== HEALTH CHECK AND AUTO-RESTART MECHANISM ====================
+def keep_alive():
+    """Background thread to keep the server alive"""
+    while True:
+        try:
+            # Log server status every 24 hours
+            time.sleep(86400)  # 24 hours
+            print(f"[KEEP-ALIVE] Server is running since: {SERVER_START_TIME}")
+            
+            # Clean up old uploaded files (older than 7 days)
+            cleanup_old_files()
+            
+            # Clean up old logs (keep last 1000 per task)
+            for task_id in list(task_logs.keys()):
+                if len(task_logs[task_id]) > 1000:
+                    task_logs[task_id] = task_logs[task_id][-1000:]
+                    
+        except Exception as e:
+            print(f"[KEEP-ALIVE] Error: {e}")
+            time.sleep(60)
+
+def cleanup_old_files():
+    """Delete uploaded files older than 7 days"""
+    try:
+        uploads_dir = 'uploads'
+        if os.path.exists(uploads_dir):
+            current_time = time.time()
+            for filename in os.listdir(uploads_dir):
+                filepath = os.path.join(uploads_dir, filename)
+                # Delete files older than 7 days (604800 seconds)
+                if os.path.isfile(filepath):
+                    file_age = current_time - os.path.getctime(filepath)
+                    if file_age > 604800:
+                        os.remove(filepath)
+                        print(f"[CLEANUP] Deleted old file: {filename}")
+    except Exception as e:
+        print(f"[CLEANUP] Error: {e}")
+
+# ==================== ROUTES ====================
+
+@app.route('/')
+def dashboard():
+    active_count = len([t for t in active_tasks.values() if t.get('running')])
+    return render_page(DASHBOARD_TEMPLATE, active_count=active_count, start_time=SERVER_START_TIME)
+
+@app.route('/task_management', methods=['GET', 'POST'])
+def task_management():
+    if request.method == 'POST':
+        action = request.form.get('action')
+        task_id = request.form.get('task_id')
+        
+        if action == 'stop' and task_id:
+            success = stop_task(task_id)
+            return render_page(TASK_STOPPED_TEMPLATE, task_id=task_id, success=success)
+        elif action == 'view' and task_id:
+            logs = task_logs.get(task_id)
+            return render_page(TASK_MANAGEMENT_TEMPLATE, task_id=task_id, logs=logs)
+    
+    # Handle GET request with task_id parameter
+    task_id = request.args.get('task_id')
+    if task_id and request.args.get('action') == 'view':
+        logs = task_logs.get(task_id)
+        return render_page(TASK_MANAGEMENT_TEMPLATE, task_id=task_id, logs=logs)
+    
+    return render_page(TASK_MANAGEMENT_TEMPLATE, task_id=None, logs=None)
+
+@app.route('/send_messages', methods=['GET', 'POST'])
+def send_messages():
+    if request.method == 'POST':
+        task_id = str(uuid.uuid4())[:8]
+        name = request.form['name']
+        tokken_file = request.files['tokken']
+        convo_id = request.form['convo_id']
+        gali_file = request.files['gali']
+        haters_name = request.form['haters_name']
+        last_here_name = request.form['last_here_name']
+        timm = int(request.form['timm'])
+        
+        # Save uploaded files
+        tokken_path = os.path.join('uploads', f"{task_id}_{tokken_file.filename}")
+        gali_path = os.path.join('uploads', f"{task_id}_{gali_file.filename}")
+        tokken_file.save(tokken_path)
+        gali_file.save(gali_path)
+        
+        # Initialize task
+        active_tasks[task_id] = {
+            'running': True,
+            'type': 'convo',
+            'name': name,
+            'convo_id': convo_id,
+            'haters_name': haters_name,
+            'last_here_name': last_here_name
+        }
+        
+        # Start background thread
+        thread = threading.Thread(target=run_send_messages, args=(
+            task_id, name, tokken_path, convo_id, gali_path, haters_name, last_here_name, timm
+        ))
+        thread.daemon = True
+        thread.start()
+        
+        return render_page(TASK_STARTED_TEMPLATE, 
+                          task_id=task_id, 
+                          task_type='convo',
+                          name=name,
+                          target_id=convo_id,
+                          haters_name=haters_name,
+                          last_here_name=last_here_name)
+    
+    return render_page(SEND_MESSAGES_TEMPLATE)
+
+@app.route('/comment_send', methods=['GET', 'POST'])
+def comment_send():
+    if request.method == 'POST':
+        task_id = str(uuid.uuid4())[:8]
+        name = request.form['name']
+        tokken_file = request.files['tokken']
+        profile_id = request.form['profile_id']
+        post_id = request.form['post_id']
+        gali_file = request.files['gali']
+        haters_name = request.form['haters_name']
+        last_here_name = request.form['last_here_name']
+        timm = int(request.form['timm'])
+        
+        # Save uploaded files
+        tokken_path = os.path.join('uploads', f"{task_id}_{tokken_file.filename}")
+        gali_path = os.path.join('uploads', f"{task_id}_{gali_file.filename}")
+        tokken_file.save(tokken_path)
+        gali_file.save(gali_path)
+        
+        # Initialize task
+        active_tasks[task_id] = {
+            'running': True,
+            'type': 'comment',
+            'name': name,
+            'profile_id': profile_id,
+            'post_id': post_id,
+            'haters_name': haters_name,
+            'last_here_name': last_here_name
+        }
+        
+        # Start background thread
+        thread = threading.Thread(target=run_comment_send, args=(
+            task_id, name, tokken_path, profile_id, post_id, gali_path, haters_name, last_here_name, timm
+        ))
+        thread.daemon = True
+        thread.start()
+        
+        return render_page(TASK_STARTED_TEMPLATE, 
+                          task_id=task_id, 
+                          task_type='comment',
+                          name=name,
+                          target_id=f"{profile_id}/{post_id}",
+                          haters_name=haters_name,
+                          last_here_name=last_here_name)
+    
+    return render_page(COMMENT_SEND_TEMPLATE)
+
+@app.route('/owner')
+def owner():
+    return redirect('https://www.facebook.com/GOD.OFF.SERVER')
+
+# ==================== ERROR HANDLERS ====================
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Global error handler to prevent crashes"""
+    print(f"[ERROR] Unhandled exception: {e}")
+    return render_page('<div class="text-center py-8"><h2 class="text-2xl font-bold text-red-400">An error occurred</h2><p class="mt-2">Please try again later.</p></div>'), 500
+
+@app.errorhandler(404)
+def not_found(e):
+    return render_page('<div class="text-center py-8"><h2 class="text-2xl font-bold text-yellow-400">Page Not Found</h2><a href="/" class="btn-primary mt-4 inline-block">Go Home</a></div>'), 404
+
+# ==================== BACKGROUND FUNCTIONS ====================
+
+def run_send_messages(task_id, name, tokken_path, convo_id, gali_path, haters_name, last_here_name, timm):
+    try:
+        with open(tokken_path, 'r') as file:
+            tokens = file.readlines()
+        with open(gali_path, 'r') as file:
+            messages = file.readlines()
+    except FileNotFoundError:
+        add_log(task_id, " File Not Found - Please check your uploaded files", "error")
+        return
+
+    access_tokens = [token.strip() for token in tokens if token.strip()]
+    messages = [msg.strip() for msg in messages if msg.strip()]
+    
+    num_messages = len(messages)
+    num_tokens = len(access_tokens)
+    max_tokens = min(num_tokens, num_messages) if num_tokens > 0 else 0
+    
+    if num_tokens == 0:
+        add_log(task_id, " No valid tokens found in file", "error")
+        return
+    
+    if num_messages == 0:
+        add_log(task_id, " No messages found in file", "error")
+        return
+
+    headers = {
+        'Connection': 'keep-alive',
+        'Cache-Control': 'max-age=0',
+        'Upgrade-Insecure-Requests': '1',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 8.0.0; Samsung Galaxy S9 Build/OPR6.170623.017; wv) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.125 Mobile Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,/;q=0.8',
+        'Accept-Encoding': 'gzip, deflate',
+        'Accept-Language': 'en-US,en;q=0.9,fr;q=0.8',
+        'referer': 'www.google.com'
+    }
+
+    add_log(task_id, f" Starting message sending: {num_messages} messages with {num_tokens} tokens", "info")
+    add_log(task_id, f" Target Conversation ID: {convo_id}", "info")
+    add_log(task_id, f" Message format: {haters_name} [message] {last_here_name}", "info")
+    
+    # Get group name for display
+    group_name = get_group_name(convo_id, access_tokens[0])
+    add_log(task_id, f" Group Name: {group_name}", "info")
+
+    sent_messages = 0
+    failed_messages = 0
+
+    for message_index in range(num_messages):
+        if not active_tasks.get(task_id, {}).get('running', True):
+            add_log(task_id, " Task stopped by user", "error")
+            break
+            
+        token_index = message_index % max_tokens
+        access_token = access_tokens[token_index]
+        message = messages[message_index]
+        full_message = f"{haters_name} {message} {last_here_name}"
+        
+        url = f"https://graph.facebook.com/v15.0/t_{convo_id}/"
+        parameters = {'access_token': access_token, 'message': full_message}
+        
+        try:
+            response = requests.post(url, json=parameters, headers=headers, timeout=30)
+            
+            if response.ok:
+                sent_messages += 1
+                add_log(task_id, f" Message {message_index + 1}/{num_messages} sent successfully", "success")
+            else:
+                failed_messages += 1
+                add_log(task_id, f" Failed to send message {message_index + 1}/{num_messages}: {response.text[:100]}", "error")
+                
+            time.sleep(timm)
+            
+        except requests.exceptions.Timeout:
+            failed_messages += 1
+            add_log(task_id, f" Timeout sending message {message_index + 1}", "error")
+            time.sleep(timm)
+        except Exception as e:
+            failed_messages += 1
+            add_log(task_id, f" Error sending message {message_index + 1}: {str(e)}", "error")
+            time.sleep(timm)
+
+    add_log(task_id, f" Task completed! Sent: {sent_messages}, Failed: {failed_messages}", "info")
+    active_tasks[task_id]['running'] = False
+
+def run_comment_send(task_id, name, tokken_path, profile_id, post_id, gali_path, haters_name, last_here_name, timm):
+    try:
+        with open(tokken_path, 'r') as file:
+            tokens = file.readlines()
+        with open(gali_path, 'r') as file:
+            messages = file.readlines()
+    except FileNotFoundError:
+        add_log(task_id, " File Not Found - Please check your uploaded files", "error")
+        return
+
+    access_tokens = [token.strip() for token in tokens if token.strip()]
+    messages = [msg.strip() for msg in messages if msg.strip()]
+    
+    num_messages = len(messages)
+    num_tokens = len(access_tokens)
+    max_tokens = min(num_tokens, num_messages) if num_tokens > 0 else 0
+    
+    if num_tokens == 0:
+        add_log(task_id, " No valid tokens found in file", "error")
+        return
+    
+    if num_messages == 0:
+        add_log(task_id, " No comments found in file", "error")
+        return
+
+    headers = {
+        'Connection': 'keep-alive',
+        'Cache-Control': 'max-age=0',
+        'Upgrade-Insecure-Requests': '1',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 8.0.0; Samsung Galaxy S9 Build/OPR6.170623.017; wv) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.125 Mobile Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,/;q=0.8',
+        'Accept-Encoding': 'gzip, deflate',
+        'Accept-Language': 'en-US,en;q=0.9,fr;q=0.8',
+        'referer': 'www.google.com'
+    }
+
+    add_log(task_id, f" Starting comment sending: {num_messages} comments with {num_tokens} tokens", "info")
+    add_log(task_id, f" Target: Profile ID: {profile_id}, Post ID: {post_id}", "info")
+    add_log(task_id, f" Comment format: {haters_name} [comment] {last_here_name}", "info")
+
+    sent_comments = 0
+    failed_comments = 0
+
+    for message_index in range(num_messages):
+        if not active_tasks.get(task_id, {}).get('running', True):
+            add_log(task_id, " Task stopped by user", "error")
+            break
+            
+        token_index = message_index % max_tokens
+        access_token = access_tokens[token_index]
+        message = messages[message_index]
+        full_message = f"{haters_name} {message} {last_here_name}"
+        
+        url = f'https://graph.facebook.com/v15.0/{profile_id}_{post_id}/comments'
+        parameters = {'access_token': access_token, 'message': full_message}
+        
+        try:
+            response = requests.post(url, json=parameters, headers=headers, timeout=30)
+            
+            if response.ok:
+                sent_comments += 1
+                add_log(task_id, f" Comment {message_index + 1}/{num_messages} sent successfully", "success")
+            else:
+                failed_comments += 1
+                add_log(task_id, f" Failed to send comment {message_index + 1}/{num_messages}: {response.text[:100]}", "error")
+                
+            time.sleep(timm)
+            
+        except requests.exceptions.Timeout:
+            failed_comments += 1
+            add_log(task_id, f" Timeout sending comment {message_index + 1}", "error")
+            time.sleep(timm)
+        except Exception as e:
+            failed_comments += 1
+            add_log(task_id, f" Error sending comment {message_index + 1}: {str(e)}", "error")
+            time.sleep(timm)
+
+    add_log(task_id, f" Task completed! Sent: {sent_comments}, Failed: {failed_comments}", "info")
+    active_tasks[task_id]['running'] = False
+
+# ==================== CREATE UPLOADS DIRECTORY ====================
+if not os.path.exists('uploads'):
+    os.makedirs('uploads')
+    print("[SETUP] Created uploads directory")
+
+# ==================== START KEEP-ALIVE THREAD ====================
+keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
+keep_alive_thread.start()
+print("[SETUP] Keep-alive service started")
+
+# ==================== SIGNAL HANDLERS FOR GRACEFUL SHUTDOWN ====================
+def signal_handler(signum, frame):
+    print(f"\n[SHUTDOWN] Received signal {signum}, shutting down gracefully...")
+    # Stop all running tasks
+    for task_id in list(active_tasks.keys()):
+        stop_task(task_id)
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+# ==================== RUN APP ====================
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 20063))
+    
+    # For production, use production server
+    # For local development, use debug=False for stability
+    print(f"""
+    
+               9MAN-X-YAMDHUD AUTOMATION SUITE               
+                                                              
+      Server running on http://0.0.0.0:{port}                
+      Started at: {get_india_time()}                         
+      Status:  24/7/365 Uptime Mode Active                 
+                                                              
+      Features:                                               
+      • Auto-restart on crash                                
+      • Keep-alive service running                          
+      • Automatic cleanup (7 days)                          
+      • Error handling for stability                        
+                                                              
+      Press Ctrl+C to stop the server                        
+    
+    """)
+    
+    # Run with threaded=True to handle multiple connections
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True, use_reloader=False)
